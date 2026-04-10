@@ -151,6 +151,10 @@ class TestSignalHelpers:
         from gateway.platforms.signal import _guess_extension
         assert _guess_extension(b"\x00\x00\x00\x18ftypisom" + b"\x00" * 100) == ".mp4"
 
+    def test_guess_extension_m4a(self):
+        from gateway.platforms.signal import _guess_extension
+        assert _guess_extension(b"\x00\x00\x00\x18ftypM4A " + b"\x00" * 100) == ".m4a"
+
     def test_guess_extension_unknown(self):
         from gateway.platforms.signal import _guess_extension
         assert _guess_extension(b"\x00\x01\x02\x03" * 10) == ".bin"
@@ -247,6 +251,52 @@ class TestSignalAttachmentFetch:
         assert ext == ""
 
     @pytest.mark.asyncio
+    async def test_fetch_attachment_uses_recipient_for_dm(self, monkeypatch):
+        adapter = _make_signal_adapter(monkeypatch)
+
+        png_data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        b64_data = base64.b64encode(png_data).decode()
+        adapter._rpc, captured = _stub_rpc({"data": b64_data})
+
+        with patch("gateway.platforms.signal.cache_image_from_bytes", return_value="/tmp/test.png"):
+            await adapter._fetch_attachment("attachment-123", sender="+15550001111")
+
+        assert captured[0]["params"]["recipient"] == "+15550001111"
+        assert "groupId" not in captured[0]["params"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_attachment_uses_group_id_for_groups(self, monkeypatch):
+        adapter = _make_signal_adapter(monkeypatch)
+
+        png_data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+        b64_data = base64.b64encode(png_data).decode()
+        adapter._rpc, captured = _stub_rpc({"data": b64_data})
+
+        with patch("gateway.platforms.signal.cache_image_from_bytes", return_value="/tmp/test.png"):
+            await adapter._fetch_attachment("attachment-123", sender="+15550001111", group_id="group-abc")
+
+        assert captured[0]["params"]["groupId"] == "group-abc"
+        assert "recipient" not in captured[0]["params"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_attachment_uses_local_path_when_available(self, monkeypatch, tmp_path):
+        adapter = _make_signal_adapter(monkeypatch)
+        local_file = tmp_path / "voice-note.m4a"
+        local_file.write_bytes(b"audio")
+
+        rpc = AsyncMock(return_value=None)
+        adapter._rpc = rpc
+
+        path, ext = await adapter._fetch_attachment(
+            None,
+            attachment={"path": str(local_file)},
+        )
+
+        assert path == str(local_file)
+        assert ext == ".m4a"
+        rpc.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_fetch_attachment_handles_dict_response(self, monkeypatch):
         adapter = _make_signal_adapter(monkeypatch)
 
@@ -260,6 +310,27 @@ class TestSignalAttachmentFetch:
 
         assert path == "/tmp/test.pdf"
         assert ext == ".pdf"
+
+    @pytest.mark.asyncio
+    async def test_fetch_attachment_preserves_document_filename(self, monkeypatch):
+        adapter = _make_signal_adapter(monkeypatch)
+
+        markdown_data = b"# Notes\nHello from Signal"
+        b64_data = base64.b64encode(markdown_data).decode()
+        adapter._rpc, _ = _stub_rpc({"data": b64_data})
+
+        with patch(
+            "gateway.platforms.signal.cache_document_from_bytes",
+            return_value="/tmp/readme.md",
+        ) as cache_doc:
+            path, ext = await adapter._fetch_attachment(
+                "doc-789",
+                attachment={"fileName": "readme.md", "contentType": "text/markdown"},
+            )
+
+        assert path == "/tmp/readme.md"
+        assert ext == ".md"
+        cache_doc.assert_called_once_with(markdown_data, "readme.md")
 
 
 # ---------------------------------------------------------------------------
@@ -668,6 +739,86 @@ class TestSignalMediaExtraction:
         assert type(adapter).send_video is not BasePlatformAdapter.send_video
         assert type(adapter).send_document is not BasePlatformAdapter.send_document
         assert type(adapter).send_image is not BasePlatformAdapter.send_image
+
+
+# ---------------------------------------------------------------------------
+# Inbound attachment handling
+# ---------------------------------------------------------------------------
+
+class TestSignalInboundDocuments:
+    @pytest.mark.asyncio
+    async def test_md_attachment_is_injected_and_marked_document(self, monkeypatch, tmp_path):
+        adapter = _make_signal_adapter(monkeypatch)
+        adapter.handle_message = AsyncMock()
+
+        markdown_path = tmp_path / "readme.md"
+        markdown_path.write_text("# Title\nSome markdown content", encoding="utf-8")
+
+        envelope = {
+            "envelope": {
+                "sourceNumber": "+15550001111",
+                "sourceName": "Cameron",
+                "timestamp": 1710000000000,
+                "dataMessage": {
+                    "message": "please read this",
+                    "attachments": [
+                        {
+                            "path": str(markdown_path),
+                            "fileName": "readme.md",
+                            "contentType": "text/markdown",
+                            "size": markdown_path.stat().st_size,
+                        }
+                    ],
+                },
+            }
+        }
+
+        await adapter._handle_envelope(envelope)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.message_type.value == "document"
+        assert event.media_urls == [str(markdown_path)]
+        assert event.media_types == ["text/markdown"]
+        assert "[Content of readme.md]:" in event.text
+        assert "# Title" in event.text
+        assert "please read this" in event.text
+
+    @pytest.mark.asyncio
+    async def test_pdf_attachment_is_marked_document(self, monkeypatch, tmp_path):
+        adapter = _make_signal_adapter(monkeypatch)
+        adapter.handle_message = AsyncMock()
+
+        pdf_path = tmp_path / "report.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n%test")
+
+        envelope = {
+            "envelope": {
+                "sourceNumber": "+15550001111",
+                "sourceName": "Cameron",
+                "timestamp": 1710000000000,
+                "dataMessage": {
+                    "message": "",
+                    "attachments": [
+                        {
+                            "path": str(pdf_path),
+                            "fileName": "report.pdf",
+                            "contentType": "application/pdf",
+                            "size": pdf_path.stat().st_size,
+                        }
+                    ],
+                },
+            }
+        }
+
+        await adapter._handle_envelope(envelope)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert event.message_type.value == "document"
+        assert event.media_urls == [str(pdf_path)]
+        assert event.media_types == ["application/pdf"]
+        assert "[Content of" not in (event.text or "")
 
 
 # ---------------------------------------------------------------------------

@@ -45,12 +45,14 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 SIGNAL_MAX_ATTACHMENT_SIZE = 100 * 1024 * 1024  # 100 MB
+MAX_TEXT_INJECT_BYTES = 100 * 1024
 MAX_MESSAGE_LENGTH = 8000  # Signal message size limit
 TYPING_INTERVAL = 8.0  # seconds between typing indicator refreshes
 SSE_RETRY_DELAY_INITIAL = 2.0
 SSE_RETRY_DELAY_MAX = 60.0
 HEALTH_CHECK_INTERVAL = 30.0  # seconds between health checks
 HEALTH_CHECK_STALE_THRESHOLD = 120.0  # seconds without SSE activity before concern
+SIGNAL_ATTACHMENTS_DIR = Path("~/.local/share/signal-cli/attachments").expanduser()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -74,7 +76,10 @@ def _guess_extension(data: bytes) -> str:
         return ".webp"
     if data[:4] == b"%PDF":
         return ".pdf"
-    if len(data) >= 8 and data[4:8] == b"ftyp":
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in (b"M4A ", b"M4B ", b"M4P "):
+            return ".m4a"
         return ".mp4"
     if data[:4] == b"OggS":
         return ".ogg"
@@ -105,6 +110,136 @@ _EXT_TO_MIME = {
 def _ext_to_mime(ext: str) -> str:
     """Map file extension to MIME type."""
     return _EXT_TO_MIME.get(ext.lower(), "application/octet-stream")
+
+
+def _resolve_signal_attachment_path(attachment: dict) -> Optional[str]:
+    """Resolve a signal-cli attachment to a local file path when possible."""
+    if not attachment or not isinstance(attachment, dict):
+        return None
+
+    path_fields = (
+        "path",
+        "file",
+        "filePath",
+        "localPath",
+    )
+    name_fields = (
+        "storedFilename",
+        "storedFileName",
+        "storedFile",
+        "filename",
+        "fileName",
+    )
+
+    for field in path_fields:
+        value = attachment.get(field)
+        if not value or not isinstance(value, str):
+            continue
+
+        candidate = Path(value).expanduser()
+        if candidate.exists() and candidate.is_file():
+            return str(candidate)
+
+        fallback = SIGNAL_ATTACHMENTS_DIR / Path(value).name
+        if fallback.exists() and fallback.is_file():
+            return str(fallback)
+
+    for field in name_fields:
+        value = attachment.get(field)
+        if not value or not isinstance(value, str):
+            continue
+
+        candidate = Path(value).expanduser()
+        if candidate.is_absolute() and candidate.exists() and candidate.is_file():
+            return str(candidate)
+
+        fallback = SIGNAL_ATTACHMENTS_DIR / Path(value).name
+        if fallback.exists() and fallback.is_file():
+            return str(fallback)
+
+    return None
+
+
+def _attachment_filename(attachment: dict) -> str:
+    """Return the best available filename for a Signal attachment."""
+    if not attachment or not isinstance(attachment, dict):
+        return ""
+
+    candidate_fields = (
+        "fileName",
+        "filename",
+        "storedFilename",
+        "storedFileName",
+        "storedFile",
+        "name",
+        "path",
+        "file",
+        "filePath",
+        "localPath",
+    )
+
+    for field in candidate_fields:
+        value = attachment.get(field)
+        if isinstance(value, str) and value.strip():
+            return Path(value).name
+
+    return ""
+
+
+def _attachment_extension(attachment: dict) -> str:
+    """Infer attachment extension from filename or MIME type metadata."""
+    filename = _attachment_filename(attachment)
+    ext = Path(filename).suffix.lower()
+    if ext:
+        return ext
+
+    content_type = str((attachment or {}).get("contentType") or "").split(";", 1)[0].strip().lower()
+    mime_to_ext = {mime: ext for ext, mime in _EXT_TO_MIME.items()}
+    return mime_to_ext.get(content_type, "")
+
+
+def _display_name_from_cached_path(path: str) -> str:
+    """Best-effort human-readable filename from a cached document path."""
+    basename = Path(path).name
+    parts = basename.split("_", 2)
+    return parts[2] if len(parts) >= 3 and parts[2] else basename
+
+
+def _sanitize_display_name(name: str) -> str:
+    """Sanitize filenames before including them in prompt text."""
+    return re.sub(r"[^\w.\- ]", "_", name or "document")
+
+
+def _maybe_build_text_injection(
+    cached_path: str,
+    content_type: str,
+    attachment: Optional[dict] = None,
+) -> str:
+    """Return inline prompt text for small text attachments, else empty string."""
+    normalized_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    if not normalized_type.startswith("text/"):
+        return ""
+
+    path_obj = Path(cached_path)
+    try:
+        if path_obj.stat().st_size > MAX_TEXT_INJECT_BYTES:
+            return ""
+    except OSError:
+        return ""
+
+    ext = path_obj.suffix.lower()
+    filename = _attachment_filename(attachment or {}) or _display_name_from_cached_path(cached_path)
+    filename = _sanitize_display_name(filename)
+    if ext not in {".md", ".txt"} and normalized_type not in {"text/markdown", "text/plain"}:
+        return ""
+
+    try:
+        content = path_obj.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        logger.warning("Signal: failed to read text attachment %s", cached_path, exc_info=True)
+        return ""
+
+    return f"[Content of {filename}]:\n{content}"
 
 
 def _render_mentions(text: str, mentions: list) -> str:
@@ -447,25 +582,38 @@ class SignalAdapter(BasePlatformAdapter):
         attachments_data = data_message.get("attachments", [])
         media_urls = []
         media_types = []
+        text_injections: list[str] = []
 
         if attachments_data and not getattr(self, "ignore_attachments", False):
             for att in attachments_data:
                 att_id = att.get("id")
                 att_size = att.get("size", 0)
-                if not att_id:
+                if not att_id and not _resolve_signal_attachment_path(att):
                     continue
                 if att_size > SIGNAL_MAX_ATTACHMENT_SIZE:
                     logger.warning("Signal: attachment too large (%d bytes), skipping", att_size)
                     continue
                 try:
-                    cached_path, ext = await self._fetch_attachment(att_id)
+                    cached_path, ext = await self._fetch_attachment(
+                        att_id,
+                        sender=sender,
+                        group_id=group_id,
+                        attachment=att,
+                    )
                     if cached_path:
                         # Use contentType from Signal if available, else map from extension
                         content_type = att.get("contentType") or _ext_to_mime(ext)
                         media_urls.append(cached_path)
                         media_types.append(content_type)
+                        injected = _maybe_build_text_injection(cached_path, content_type, att)
+                        if injected:
+                            text_injections.append(injected)
                 except Exception:
                     logger.exception("Signal: failed to fetch attachment %s", att_id)
+
+        if text_injections:
+            injected_text = "\n\n".join(text_injections)
+            text = f"{injected_text}\n\n{text}" if text else injected_text
 
         # Build session source
         source = self.build_source(
@@ -481,7 +629,9 @@ class SignalAdapter(BasePlatformAdapter):
         # Determine message type from media
         msg_type = MessageType.TEXT
         if media_types:
-            if any(mt.startswith("audio/") for mt in media_types):
+            if any(mt.startswith(("application/", "text/")) for mt in media_types):
+                msg_type = MessageType.DOCUMENT
+            elif any(mt.startswith("audio/") for mt in media_types):
                 msg_type = MessageType.VOICE
             elif any(mt.startswith("image/") for mt in media_types):
                 msg_type = MessageType.PHOTO
@@ -515,12 +665,32 @@ class SignalAdapter(BasePlatformAdapter):
     # Attachment Handling
     # ------------------------------------------------------------------
 
-    async def _fetch_attachment(self, attachment_id: str) -> tuple:
+    async def _fetch_attachment(
+        self,
+        attachment_id: Optional[str],
+        sender: Optional[str] = None,
+        group_id: Optional[str] = None,
+        attachment: Optional[dict] = None,
+    ) -> tuple:
         """Fetch an attachment via JSON-RPC and cache it. Returns (path, ext)."""
-        result = await self._rpc("getAttachment", {
+        local_path = _resolve_signal_attachment_path(attachment or {})
+        if local_path and Path(local_path).exists():
+            ext = Path(local_path).suffix.lower() or ".bin"
+            return local_path, ext
+
+        if not attachment_id:
+            return None, ""
+
+        params = {
             "account": self.account,
             "id": attachment_id,
-        })
+        }
+        if group_id:
+            params["groupId"] = group_id
+        elif sender:
+            params["recipient"] = sender
+
+        result = await self._rpc("getAttachment", params)
 
         if not result:
             return None, ""
@@ -535,13 +705,16 @@ class SignalAdapter(BasePlatformAdapter):
         # Result is base64-encoded file content
         raw_data = base64.b64decode(result)
         ext = _guess_extension(raw_data)
+        if ext == ".bin":
+            ext = _attachment_extension(attachment or {}) or ext
 
         if _is_image_ext(ext):
             path = cache_image_from_bytes(raw_data, ext)
         elif _is_audio_ext(ext):
             path = cache_audio_from_bytes(raw_data, ext)
         else:
-            path = cache_document_from_bytes(raw_data, ext)
+            filename = _attachment_filename(attachment or {}) or f"document{ext}"
+            path = cache_document_from_bytes(raw_data, filename)
 
         return path, ext
 
