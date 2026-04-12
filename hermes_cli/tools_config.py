@@ -179,6 +179,18 @@ TOOL_CATEGORIES = {
                 ],
                 "tts_provider": "elevenlabs",
             },
+            {
+                "name": "KittenTTS",
+                "tag": "Local - lightweight ONNX voice synthesis",
+                "env_vars": [],
+                "tts_provider": "kitten",
+            },
+            {
+                "name": "MLX Audio Server",
+                "tag": "Local/self-hosted - custom voices like Samantha and Judy",
+                "env_vars": [],
+                "tts_provider": "mlx",
+            },
         ],
     },
     "web": {

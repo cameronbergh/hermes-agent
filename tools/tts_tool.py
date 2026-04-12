@@ -8,6 +8,8 @@ Supports five TTS providers:
 - OpenAI TTS: Good quality, needs OPENAI_API_KEY
 - MiniMax TTS: High-quality with voice cloning, needs MINIMAX_API_KEY
 - NeuTTS (local, free, no API key): On-device TTS via neutts_cli, needs neutts installed
+- KittenTTS (local, free, no API key): Local ONNX TTS via kittentts
+- MLX TTS (local/self-hosted): OpenAI-compatible or custom audio endpoint
 
 Output formats:
 - Opus (.ogg) for Telegram voice bubbles (requires ffmpeg for Edge TTS)
@@ -23,6 +25,7 @@ Usage:
 """
 
 import asyncio
+import base64
 import datetime
 import json
 import logging
@@ -36,7 +39,8 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Callable, Dict, Any, Optional
-from urllib.parse import urljoin
+from urllib.parse import urlencode, urljoin
+from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
@@ -442,6 +446,142 @@ def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) ->
 
 
 # ===========================================================================
+# KittenTTS (local, on-device TTS via kittentts)
+# ===========================================================================
+def _check_kitten_available(python_bin: str) -> bool:
+    """Check if the configured Python can import kittentts."""
+    try:
+        result = subprocess.run(
+            [python_bin, "-c", "import kittentts"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _generate_kitten(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate speech using KittenTTS in a separate Python interpreter."""
+    import sys
+
+    kitten_config = tts_config.get("kitten", {})
+    python_bin = kitten_config.get("python_bin", "").strip() or sys.executable
+    voice = kitten_config.get("voice", "Rosie")
+    model_name = kitten_config.get("model_name", "KittenML/kitten-tts-nano-0.8")
+    speed = float(kitten_config.get("speed", 1.0))
+    cache_dir = kitten_config.get("cache_dir", "").strip()
+    clean_text = bool(kitten_config.get("clean_text", True))
+
+    wav_path = output_path
+    if not output_path.endswith(".wav"):
+        wav_path = output_path.rsplit(".", 1)[0] + ".wav"
+
+    synth_script = str(Path(__file__).parent / "kitten_tts_synth.py")
+    cmd = [
+        python_bin,
+        synth_script,
+        "--text",
+        text,
+        "--out",
+        wav_path,
+        "--voice",
+        voice,
+        "--model-name",
+        model_name,
+        "--speed",
+        str(speed),
+    ]
+    if cache_dir:
+        cmd.extend(["--cache-dir", cache_dir])
+    if clean_text:
+        cmd.append("--clean-text")
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"KittenTTS synthesis failed: {stderr or 'unknown error'}")
+
+    if wav_path != output_path:
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            conv_cmd = [ffmpeg, "-i", wav_path, "-y", "-loglevel", "error", output_path]
+            subprocess.run(conv_cmd, check=True, timeout=30)
+            os.remove(wav_path)
+        else:
+            os.rename(wav_path, output_path)
+
+    return output_path
+
+
+# ===========================================================================
+# MLX TTS (local/self-hosted OpenAI-compatible audio server)
+# ===========================================================================
+def _generate_mlx(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
+    """Generate speech using a local or self-hosted MLX audio server."""
+    mlx_config = tts_config.get("mlx", {})
+    base_url = mlx_config.get("base_url", "").strip()
+    if not base_url:
+        raise ValueError("tts.mlx.base_url is not configured")
+
+    voice = str(mlx_config.get("voice", "samantha")).strip() or "samantha"
+    speed = float(mlx_config.get("speed", 1.0))
+    timeout = float(mlx_config.get("timeout", 60))
+    model = str(
+        mlx_config.get("model", "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit")
+    ).strip()
+    base_url = base_url.rstrip("/")
+
+    if voice.lower() in {"samantha", "judy"}:
+        query = urlencode({"text": text, "speed": speed})
+        url = f"{base_url}/v1/audio/{voice.lower()}?{query}"
+        request = Request(url, method="POST")
+    else:
+        url = f"{base_url}/v1/audio/speech"
+        payload = json.dumps(
+            {
+                "text": text,
+                "model": model,
+                "voice": voice,
+                "speed": speed,
+            }
+        ).encode("utf-8")
+        request = Request(
+            url,
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+
+    with urlopen(request, timeout=timeout) as response:
+        data = json.loads(response.read().decode("utf-8"))
+
+    audio_b64 = data.get("audio")
+    if not isinstance(audio_b64, str) or not audio_b64:
+        raise RuntimeError("MLX TTS response missing audio field")
+
+    source_format = str(data.get("format", "mp3")).lower()
+    source_path = output_path
+    if not source_path.endswith(f".{source_format}"):
+        source_path = output_path.rsplit(".", 1)[0] + f".{source_format}"
+
+    with open(source_path, "wb") as f:
+        f.write(base64.b64decode(audio_b64))
+
+    if source_path != output_path:
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            conv_cmd = [ffmpeg, "-i", source_path, "-y", "-loglevel", "error", output_path]
+            subprocess.run(conv_cmd, check=True, timeout=30)
+            os.remove(source_path)
+        else:
+            os.rename(source_path, output_path)
+
+    return output_path
+
+
+# ===========================================================================
 # Main tool function
 # ===========================================================================
 def text_to_speech_tool(
@@ -539,6 +679,20 @@ def text_to_speech_tool(
             logger.info("Generating speech with NeuTTS (local)...")
             _generate_neutts(text, file_str, tts_config)
 
+        elif provider == "kitten":
+            kitten_python = tts_config.get("kitten", {}).get("python_bin", "").strip()
+            if not _check_kitten_available(kitten_python or os.getenv("PYTHON", "python3")):
+                return json.dumps({
+                    "success": False,
+                    "error": "KittenTTS provider selected but kittentts is not installed in the configured Python environment.",
+                }, ensure_ascii=False)
+            logger.info("Generating speech with KittenTTS (local)...")
+            _generate_kitten(text, file_str, tts_config)
+
+        elif provider == "mlx":
+            logger.info("Generating speech with MLX TTS...")
+            _generate_mlx(text, file_str, tts_config)
+
         else:
             # Default: Edge TTS (free), with NeuTTS as local fallback
             edge_available = True
@@ -575,17 +729,20 @@ def text_to_speech_tool(
                 "error": f"TTS generation produced no output (provider: {provider})"
             }, ensure_ascii=False)
 
-        # Try Opus conversion for Telegram compatibility
-        # Edge TTS outputs MP3, NeuTTS outputs WAV — both need ffmpeg conversion
+        # Try Opus conversion only for Telegram voice-bubble compatibility.
+        # Signal/Discord/etc. should keep the provider's original format
+        # (typically MP3) instead of forcing an OGG attachment.
         voice_compatible = False
-        if provider in ("edge", "neutts", "minimax") and not file_str.endswith(".ogg"):
-            opus_path = _convert_to_opus(file_str)
-            if opus_path:
-                file_str = opus_path
-                voice_compatible = True
-        elif provider in ("elevenlabs", "openai"):
-            # These providers can output Opus natively if the path ends in .ogg
-            voice_compatible = file_str.endswith(".ogg")
+        if want_opus:
+            # Edge TTS outputs MP3, NeuTTS outputs WAV — both need ffmpeg conversion
+            if provider in ("edge", "neutts", "minimax", "kitten", "mlx") and not file_str.endswith(".ogg"):
+                opus_path = _convert_to_opus(file_str)
+                if opus_path:
+                    file_str = opus_path
+                    voice_compatible = True
+            elif provider in ("elevenlabs", "openai"):
+                # These providers can output Opus natively if the path ends in .ogg
+                voice_compatible = file_str.endswith(".ogg")
 
         file_size = os.path.getsize(file_str)
         logger.info("TTS audio saved: %s (%s bytes, provider: %s)", file_str, f"{file_size:,}", provider)

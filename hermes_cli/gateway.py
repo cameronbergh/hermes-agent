@@ -988,6 +988,37 @@ def _launchd_domain() -> str:
     return f"gui/{os.getuid()}"
 
 
+def _launchd_target() -> str:
+    return f"{_launchd_domain()}/{get_launchd_label()}"
+
+
+def _launchd_is_disabled() -> bool:
+    """Return whether launchd has this gateway label explicitly disabled."""
+    try:
+        result = subprocess.run(
+            ["launchctl", "print-disabled", _launchd_domain()],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+
+    disabled_line = f'"{get_launchd_label()}" => disabled'
+    return disabled_line in result.stdout
+
+
+def _launchd_enable_if_needed() -> bool:
+    """Ensure the gateway label is enabled before bootstrapping it."""
+    if not _launchd_is_disabled():
+        return False
+
+    subprocess.run(["launchctl", "enable", _launchd_target()], check=True, timeout=30)
+    print("↻ Re-enabled disabled launchd gateway service")
+    return True
+
+
 def generate_launchd_plist() -> str:
     python_path = get_python_path()
     working_dir = str(PROJECT_ROOT)
@@ -1101,8 +1132,21 @@ def refresh_launchd_plist_if_needed() -> bool:
     plist_path.write_text(generate_launchd_plist(), encoding="utf-8")
     label = get_launchd_label()
     # Bootout/bootstrap so launchd picks up the new definition
-    subprocess.run(["launchctl", "bootout", f"{_launchd_domain()}/{label}"], check=False, timeout=90)
-    subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=False, timeout=30)
+    subprocess.run(
+        ["launchctl", "bootout", f"{_launchd_domain()}/{label}"],
+        check=False,
+        timeout=90,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    _launchd_enable_if_needed()
+    subprocess.run(
+        ["launchctl", "bootstrap", _launchd_domain(), str(plist_path)],
+        check=False,
+        timeout=30,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     print("↻ Updated gateway launchd service definition to match the current Hermes install")
     return True
 
@@ -1123,7 +1167,8 @@ def launchd_install(force: bool = False):
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Installing launchd service to: {plist_path}")
     plist_path.write_text(generate_launchd_plist())
-    
+
+    _launchd_enable_if_needed()
     subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
     
     print()
@@ -1154,6 +1199,7 @@ def launchd_start():
         print("↻ launchd plist missing; regenerating service definition")
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         plist_path.write_text(generate_launchd_plist(), encoding="utf-8")
+        _launchd_enable_if_needed()
         subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
         subprocess.run(["launchctl", "kickstart", f"{_launchd_domain()}/{label}"], check=True, timeout=30)
         print("✓ Service started")
@@ -1161,11 +1207,18 @@ def launchd_start():
 
     refresh_launchd_plist_if_needed()
     try:
-        subprocess.run(["launchctl", "kickstart", f"{_launchd_domain()}/{label}"], check=True, timeout=30)
+        subprocess.run(
+            ["launchctl", "kickstart", f"{_launchd_domain()}/{label}"],
+            check=True,
+            timeout=30,
+            capture_output=True,
+            text=True,
+        )
     except subprocess.CalledProcessError as e:
         if e.returncode not in (3, 113):
             raise
         print("↻ launchd job was unloaded; reloading service definition")
+        _launchd_enable_if_needed()
         subprocess.run(["launchctl", "bootstrap", _launchd_domain(), str(plist_path)], check=True, timeout=30)
         subprocess.run(["launchctl", "kickstart", f"{_launchd_domain()}/{label}"], check=True, timeout=30)
     print("✓ Service started")
@@ -1262,7 +1315,10 @@ def launchd_status(deep: bool = False):
         print(loaded_output)
     else:
         print("✗ Gateway service is not loaded")
-        print("  Service definition exists locally but launchd has not loaded it.")
+        if _launchd_is_disabled():
+            print("  Launchd currently has this gateway label disabled.")
+        else:
+            print("  Service definition exists locally but launchd has not loaded it.")
         print("  Run: hermes gateway start")
     
     if deep:
