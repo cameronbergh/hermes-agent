@@ -272,8 +272,32 @@ def parse_model_flags(raw_args: str) -> tuple[str, str, bool]:
         "--provider my-ollama"           -> ("", "my-ollama", False)
         "sonnet --provider anthropic --global" -> ("sonnet", "anthropic", True)
     """
+    import re
+
     is_global = False
     explicit_provider = ""
+
+    # Signal and some mobile keyboards may substitute Unicode dash glyphs
+    # or glue flags directly onto the model token (for example
+    # "gpt-5.4—global"). Normalize those spellings before token parsing.
+    normalized_args = (raw_args or "").strip()
+    for dash in ("\u2010", "\u2011", "\u2012", "\u2013", "\u2014", "\u2015", "\u2212"):
+        normalized_args = normalized_args.replace(dash, "-")
+    normalized_args = re.sub(
+        r"(^|\s)-{1,2}global\b",
+        r"\1--global",
+        normalized_args,
+        flags=re.IGNORECASE,
+    )
+    normalized_args = re.sub(
+        r"(^|\s)-{1,2}provider\b",
+        r"\1--provider",
+        normalized_args,
+        flags=re.IGNORECASE,
+    )
+    normalized_args = re.sub(r"(?<=[^\s-])-global\b", " --global", normalized_args, flags=re.IGNORECASE)
+    normalized_args = re.sub(r"\s+", " ", normalized_args).strip()
+    raw_args = normalized_args
 
     # Extract --global
     if "--global" in raw_args:
@@ -573,21 +597,30 @@ def switch_model(
                         ),
                     )
             else:
-                # --- Step c: On aggregator, convert vendor:model to vendor/model ---
+                # --- Step c: Infer provider from provider:model input ---
                 # Only convert when there's no slash — a slash means the name
                 # is already in vendor/model format and the colon is a variant
                 # tag (:free, :extended, :fast) that must be preserved.
                 colon_pos = raw_input.find(":")
-                if colon_pos > 0 and "/" not in raw_input and is_aggregator(current_provider):
+                if colon_pos > 0 and "/" not in raw_input:
                     left = raw_input[:colon_pos].strip().lower()
                     right = raw_input[colon_pos + 1:].strip()
                     if left and right:
-                        # Colons become slashes for aggregator slugs
-                        new_model = f"{left}/{right}"
-                        logger.debug(
-                            "Converted vendor:model '%s' to aggregator slug '%s'",
-                            raw_input, new_model,
-                        )
+                        inferred = resolve_provider_full(left, user_providers)
+                        if inferred is not None:
+                            target_provider = inferred.id
+                            new_model = right
+                            logger.debug(
+                                "Inferred provider '%s' from provider:model input '%s'; model='%s'",
+                                target_provider, raw_input, new_model,
+                            )
+                        elif is_aggregator(current_provider):
+                            # Aggregator shorthand: vendor:model -> vendor/model
+                            new_model = f"{left}/{right}"
+                            logger.debug(
+                                "Converted vendor:model '%s' to aggregator slug '%s'",
+                                raw_input, new_model,
+                            )
 
         # --- Step d: Aggregator catalog search ---
         if is_aggregator(target_provider) and not resolved_alias:
