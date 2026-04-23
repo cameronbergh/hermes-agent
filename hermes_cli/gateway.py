@@ -6,6 +6,7 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 
 import asyncio
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -81,25 +82,31 @@ def _get_service_pids() -> set:
 
     # --- launchd (macOS) ---
     if is_macos():
-        try:
-            label = get_launchd_label()
-            result = subprocess.run(
-                ["launchctl", "list", label],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                # Output: "PID\tStatus\tLabel" header, then one data line
-                for line in result.stdout.strip().splitlines():
-                    parts = line.split()
-                    if len(parts) >= 3 and parts[2] == label:
-                        try:
-                            pid = int(parts[0])
-                            if pid > 0:
-                                pids.add(pid)
-                        except ValueError:
-                            pass
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+        print_result = _launchd_print_result(timeout=5)
+        if print_result and print_result.returncode == 0:
+            pid = _launchd_pid_from_print(print_result.stdout)
+            if pid:
+                pids.add(pid)
+        if not pids:
+            try:
+                label = get_launchd_label()
+                result = subprocess.run(
+                    ["launchctl", "list", label],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    # Output: "PID\tStatus\tLabel" header, then one data line
+                    for line in result.stdout.strip().splitlines():
+                        parts = line.split()
+                        if len(parts) >= 3 and parts[2] == label:
+                            try:
+                                pid = int(parts[0])
+                                if pid > 0:
+                                    pids.add(pid)
+                            except ValueError:
+                                pass
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
 
     return pids
 
@@ -1225,6 +1232,47 @@ def _launchd_target() -> str:
     return f"{_launchd_domain()}/{get_launchd_label()}"
 
 
+def _launchd_print_result(timeout: int = 10) -> subprocess.CompletedProcess | None:
+    """Return ``launchctl print`` output for the gateway service when available."""
+    try:
+        return subprocess.run(
+            ["launchctl", "print", _launchd_target()],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def _launchd_pid_from_print(output: str) -> int | None:
+    """Extract a launchd-managed PID from ``launchctl print`` output."""
+    match = re.search(r"(?m)^\s*pid = (\d+)\s*$", output or "")
+    if not match:
+        return None
+    pid = int(match.group(1))
+    return pid if pid > 0 else None
+
+
+def launchd_service_loaded() -> tuple[bool, str]:
+    """Return whether the launchd service is loaded plus diagnostic output."""
+    print_result = _launchd_print_result()
+    if print_result and print_result.returncode == 0:
+        return True, print_result.stdout
+
+    label = get_launchd_label()
+    try:
+        result = subprocess.run(
+            ["launchctl", "list", label],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0, result.stdout
+    except subprocess.TimeoutExpired:
+        return False, ""
+
+
 def _launchd_is_disabled() -> bool:
     """Return whether launchd has this gateway label explicitly disabled."""
     try:
@@ -1549,19 +1597,7 @@ def launchd_restart():
 
 def launchd_status(deep: bool = False):
     plist_path = get_launchd_plist_path()
-    label = get_launchd_label()
-    try:
-        result = subprocess.run(
-            ["launchctl", "list", label],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        loaded = result.returncode == 0
-        loaded_output = result.stdout
-    except subprocess.TimeoutExpired:
-        loaded = False
-        loaded_output = ""
+    loaded, loaded_output = launchd_service_loaded()
 
     print(f"Launchd plist: {plist_path}")
     if launchd_plist_is_current():
@@ -1572,7 +1608,14 @@ def launchd_status(deep: bool = False):
 
     if loaded:
         print("✓ Gateway service is loaded")
-        print(loaded_output)
+        pid = _launchd_pid_from_print(loaded_output)
+        state_match = re.search(r"(?m)^\s*state = (\S+)\s*$", loaded_output or "")
+        if pid is not None:
+            print(f"  PID: {pid}")
+        if state_match:
+            print(f"  State: {state_match.group(1)}")
+        elif loaded_output.strip():
+            print(loaded_output)
     else:
         print("✗ Gateway service is not loaded")
         if _launchd_is_disabled():
@@ -1677,6 +1720,27 @@ _PLATFORMS = [
              "help": "Paste your user ID from step 5 above."},
             {"name": "DISCORD_HOME_CHANNEL", "prompt": "Home channel ID (for cron/notification delivery, or empty to set later with /set-home)", "password": False,
              "help": "Right-click a channel → Copy Channel ID (requires Developer Mode)."},
+        ],
+    },
+    {
+        "key": "mumble",
+        "label": "Mumble",
+        "emoji": "🎙️",
+        "token_var": "MUMBLE_BRIDGE_URL",
+        "setup_instructions": [
+            "1. Start a local hermes-mumble-bridge instance for the listener bot",
+            "2. Connect that bridge instance to your Mumble server",
+            "3. Point Hermes at the listener bot's bridge URL",
+            "4. Authorize speakers by allowlist, or enable open access if this is a trusted server",
+        ],
+        "vars": [
+            {"name": "MUMBLE_BRIDGE_URL", "prompt": "Bridge URL (e.g. http://127.0.0.1:8789)", "password": False,
+             "help": "The local FastAPI bridge instance Hermes should poll for transcript events and use for replies."},
+            {"name": "MUMBLE_ALLOWED_USERS", "prompt": "Allowed Mumble speaker names (comma-separated)", "password": False,
+             "is_allowlist": True,
+             "help": "Speaker names Hermes will accept transcripts from. Leave empty to choose open access or configure later."},
+            {"name": "MUMBLE_HOME_CHANNEL", "prompt": "Home channel label (optional, for status display)", "password": False,
+             "help": "Optional human-readable channel label. Replies still go to the bridge's currently joined channel."},
         ],
     },
     {

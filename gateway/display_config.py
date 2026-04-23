@@ -82,6 +82,7 @@ _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
 
     # Tier 3 — no edit support, progress messages are permanent
     "signal":          _TIER_LOW,
+    "mumble":          _TIER_LOW,
     "whatsapp":        _TIER_MEDIUM,  # Baileys bridge supports /edit
     "bluebubbles":     _TIER_LOW,
     "weixin":          _TIER_LOW,

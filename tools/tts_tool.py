@@ -602,7 +602,10 @@ def _generate_mlx(text: str, output_path: str, tts_config: Dict[str, Any]) -> st
 
     if voice.lower() in {"samantha", "judy"}:
         query = urlencode({"text": text, "speed": speed})
-        url = f"{base_url}/v1/audio/{voice.lower()}?{query}"
+        endpoint = f"/v1/audio/{voice.lower()}"
+        if output_path.lower().endswith(".wav"):
+            endpoint += "/wav"
+        url = f"{base_url}{endpoint}?{query}"
         request = Request(url, method="POST")
     else:
         url = f"{base_url}/v1/audio/speech"

@@ -54,6 +54,39 @@ class ProgressCaptureAdapter(BasePlatformAdapter):
         return {"id": chat_id}
 
 
+class ProgressNoEditAdapter(BasePlatformAdapter):
+    SUPPORTS_MESSAGE_EDITING = False
+    ALLOW_TOOL_PROGRESS_WITHOUT_EDITING = True
+
+    def __init__(self, platform=Platform.MUMBLE):
+        super().__init__(PlatformConfig(enabled=True, token="***"), platform)
+        self.sent = []
+        self.typing = []
+
+    async def connect(self) -> bool:
+        return True
+
+    async def disconnect(self) -> None:
+        return None
+
+    async def send(self, chat_id, content, reply_to=None, metadata=None) -> SendResult:
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "content": content,
+                "reply_to": reply_to,
+                "metadata": metadata,
+            }
+        )
+        return SendResult(success=True, message_id=None)
+
+    async def send_typing(self, chat_id, metadata=None) -> None:
+        self.typing.append({"chat_id": chat_id, "metadata": metadata})
+
+    async def get_chat_info(self, chat_id: str):
+        return {"id": chat_id}
+
+
 class FakeAgent:
     def __init__(self, **kwargs):
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
@@ -157,6 +190,53 @@ async def test_run_agent_progress_stays_in_originating_topic(monkeypatch, tmp_pa
     ]
     assert adapter.edits
     assert all(call["metadata"] == {"thread_id": "17585"} for call in adapter.typing)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_progress_posts_new_messages_for_mumble_without_editing(
+    monkeypatch, tmp_path
+):
+    fake_dotenv = types.ModuleType("dotenv")
+    fake_dotenv.load_dotenv = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, "dotenv", fake_dotenv)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = FakeAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+    import tools.terminal_tool  # noqa: F401 - register terminal emoji for this fake-agent test
+    import yaml
+
+    (tmp_path / "config.yaml").write_text(
+        yaml.dump({"display": {"platforms": {"mumble": {"tool_progress": "all"}}}}),
+        encoding="utf-8",
+    )
+
+    adapter = ProgressNoEditAdapter()
+    runner = _make_runner(adapter)
+    gateway_run = importlib.import_module("gateway.run")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "fake"})
+    source = SessionSource(
+        platform=Platform.MUMBLE,
+        chat_id="10.42.0.1:64738",
+        chat_type="channel",
+        thread_id="0",
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-mumble-progress",
+        session_key="agent:main:mumble:channel:10.42.0.1:64738:0",
+    )
+
+    assert result["final_response"] == "done"
+    sent_texts = [call["content"] for call in adapter.sent]
+    assert '💻 terminal: "pwd"' in sent_texts
+    assert any("browser_navigate" in text for text in sent_texts)
+    assert not any("\n" in text and "browser_navigate" in text for text in sent_texts)
 
 
 @pytest.mark.asyncio

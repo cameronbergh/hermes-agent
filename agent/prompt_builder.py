@@ -325,6 +325,12 @@ PLATFORM_HINTS = {
         "files arrive as downloadable documents. You can also include image "
         "URLs in markdown format ![alt](url) and they will be sent as photos."
     ),
+    "mumble": (
+        "You are in a Mumble voice/text channel. Keep replies concise and easy to "
+        "listen to because they may be spoken aloud. Avoid markdown-heavy formatting. "
+        "Plain text replies are sent to the channel chat, and audio replies can be "
+        "played back through the Mumble bridge when voice delivery is enabled."
+    ),
     "email": (
         "You are communicating via email. Write clear, well-structured responses "
         "suitable for email. Use plain text formatting (no markdown). "

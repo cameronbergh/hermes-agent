@@ -2159,6 +2159,13 @@ class GatewayRunner:
                 return None
             return SignalAdapter(config)
 
+        elif platform == Platform.MUMBLE:
+            from gateway.platforms.mumble import MumbleAdapter, check_mumble_requirements
+            if not check_mumble_requirements():
+                logger.warning("Mumble: httpx not installed")
+                return None
+            return MumbleAdapter(config)
+
         elif platform == Platform.HOMEASSISTANT:
             from gateway.platforms.homeassistant import HomeAssistantAdapter, check_ha_requirements
             if not check_ha_requirements():
@@ -2283,6 +2290,7 @@ class GatewayRunner:
         platform_env_map = {
             Platform.TELEGRAM: "TELEGRAM_ALLOWED_USERS",
             Platform.DISCORD: "DISCORD_ALLOWED_USERS",
+            Platform.MUMBLE: "MUMBLE_ALLOWED_USERS",
             Platform.WHATSAPP: "WHATSAPP_ALLOWED_USERS",
             Platform.SLACK: "SLACK_ALLOWED_USERS",
             Platform.SIGNAL: "SIGNAL_ALLOWED_USERS",
@@ -2300,6 +2308,7 @@ class GatewayRunner:
         platform_allow_all_map = {
             Platform.TELEGRAM: "TELEGRAM_ALLOW_ALL_USERS",
             Platform.DISCORD: "DISCORD_ALLOW_ALL_USERS",
+            Platform.MUMBLE: "MUMBLE_ALLOW_ALL_USERS",
             Platform.WHATSAPP: "WHATSAPP_ALLOW_ALL_USERS",
             Platform.SLACK: "SLACK_ALLOW_ALL_USERS",
             Platform.SIGNAL: "SIGNAL_ALLOW_ALL_USERS",
@@ -7563,11 +7572,17 @@ class GatewayRunner:
             if not adapter:
                 return
 
-            # Skip tool progress for platforms that don't support message
-            # editing (e.g. iMessage/BlueBubbles) — each progress update
-            # would become a separate message bubble, which is noisy.
+            # Most no-edit platforms suppress tool progress entirely because
+            # each update would become a permanent message bubble. Some
+            # adapters can opt back in for line-by-line progress delivery.
             from gateway.platforms.base import BasePlatformAdapter as _BaseAdapter
-            if type(adapter).edit_message is _BaseAdapter.edit_message:
+            supports_editing = type(adapter).edit_message is not _BaseAdapter.edit_message
+            if not supports_editing:
+                supports_editing = bool(getattr(adapter, "SUPPORTS_MESSAGE_EDITING", False))
+            allow_without_editing = bool(
+                getattr(adapter, "ALLOW_TOOL_PROGRESS_WITHOUT_EDITING", False)
+            )
+            if not supports_editing and not allow_without_editing:
                 while not progress_queue.empty():
                     try:
                         progress_queue.get_nowait()
@@ -7577,7 +7592,8 @@ class GatewayRunner:
 
             progress_lines = []      # Accumulated tool lines
             progress_msg_id = None   # ID of the progress message to edit
-            can_edit = True          # False once an edit fails (platform doesn't support it)
+            can_edit = supports_editing
+            sent_progress_count = 0  # Number of progress_lines already sent on no-edit platforms
             _last_edit_ts = 0.0      # Throttle edits to avoid Telegram flood control
             _PROGRESS_EDIT_INTERVAL = 1.5  # Minimum seconds between edits
 
@@ -7636,6 +7652,8 @@ class GatewayRunner:
                         else:
                             # Editing unsupported: send just this line
                             result = await adapter.send(chat_id=source.chat_id, content=msg, metadata=_progress_metadata)
+                            if result.success:
+                                sent_progress_count = len(progress_lines)
                         if result.success and result.message_id:
                             progress_msg_id = result.message_id
 
@@ -7649,15 +7667,21 @@ class GatewayRunner:
                     await asyncio.sleep(0.3)
                 except asyncio.CancelledError:
                     # Drain remaining queued messages
+                    remaining_messages = []
                     while not progress_queue.empty():
                         try:
                             raw = progress_queue.get_nowait()
                             if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
                                 _, base_msg, count = raw
-                                if progress_lines:
+                                if can_edit and progress_lines:
                                     progress_lines[-1] = f"{base_msg} (×{count + 1})"
+                                elif not can_edit:
+                                    remaining_messages.append(f"{base_msg} (×{count + 1})")
                             else:
-                                progress_lines.append(raw)
+                                if can_edit:
+                                    progress_lines.append(raw)
+                                else:
+                                    remaining_messages.append(raw)
                         except Exception:
                             break
                     # Final edit with all remaining tools (only if editing works)
@@ -7671,6 +7695,17 @@ class GatewayRunner:
                             )
                         except Exception:
                             pass
+                    elif not can_edit:
+                        unsent_progress_lines = progress_lines[sent_progress_count:]
+                        for msg in [*unsent_progress_lines, *remaining_messages]:
+                            try:
+                                await adapter.send(
+                                    chat_id=source.chat_id,
+                                    content=msg,
+                                    metadata=_progress_metadata,
+                                )
+                            except Exception:
+                                pass
                     return
                 except Exception as e:
                     logger.error("Progress message error: %s", e)

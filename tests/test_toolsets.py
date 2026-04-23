@@ -1,14 +1,10 @@
 """Tests for toolsets.py — toolset resolution, validation, and composition."""
 
-import pytest
-
 from toolsets import (
     TOOLSETS,
     get_toolset,
     resolve_toolset,
     resolve_multiple_toolsets,
-    get_all_toolsets,
-    get_toolset_names,
     validate_toolset,
     create_custom_toolset,
     get_toolset_info,
@@ -20,6 +16,13 @@ class TestGetToolset:
         ts = get_toolset("web")
         assert ts is not None
         assert "web_search" in ts["tools"]
+
+    def test_mumble_toolset_exists(self):
+        ts = get_toolset("mumble")
+        assert ts is not None
+        assert "mumble_status" in ts["tools"]
+        assert "mumble_message" in ts["tools"]
+        assert "mumble_speak" in ts["tools"]
 
     def test_unknown_returns_none(self):
         assert get_toolset("nonexistent") is None
@@ -136,7 +139,7 @@ class TestToolsetConsistency:
 
     def test_hermes_platforms_share_core_tools(self):
         """All hermes-* platform toolsets should have the same tools."""
-        platforms = ["hermes-cli", "hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant"]
+        platforms = ["hermes-cli", "hermes-telegram", "hermes-discord", "hermes-mumble", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant"]
         tool_sets = [set(TOOLSETS[p]["tools"]) for p in platforms]
         # All platform toolsets should be identical
         for ts in tool_sets[1:]:

@@ -88,7 +88,12 @@ class TestSlashCommands:
         send.assert_called_once()
         response_text = send.call_args[1].get("content") or send.call_args[0][1]
         # Either shows the mode cycle or tells user to enable it in config
-        assert "verbose" in response_text.lower() or "tool_progress" in response_text
+        response_lower = response_text.lower()
+        assert (
+            "verbose" in response_lower
+            or "tool_progress" in response_text
+            or "tool progress" in response_lower
+        )
 
     @pytest.mark.asyncio
     async def test_personality_lists_options(self, adapter, platform):

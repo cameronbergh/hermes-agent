@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,6 +27,14 @@ def _make_config():
         platforms={Platform.TELEGRAM: telegram_cfg},
         get_home_channel=lambda _platform: None,
     ), telegram_cfg
+
+
+def _make_mumble_config():
+    mumble_cfg = SimpleNamespace(enabled=True, token=None, extra={"base_url": "http://127.0.0.1:8789"})
+    return SimpleNamespace(
+        platforms={Platform.MUMBLE: mumble_cfg},
+        get_home_channel=lambda _platform: None,
+    ), mumble_cfg
 
 
 def _install_telegram_mock(monkeypatch, bot):
@@ -63,6 +70,47 @@ def _ensure_slack_mock(monkeypatch):
 
 
 class TestSendMessageTool:
+    def test_mumble_target_without_home_channel_uses_current_bridge_channel(self):
+        config, mumble_cfg = _make_mumble_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "mumble",
+                        "message": "hello current channel",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.MUMBLE,
+            mumble_cfg,
+            "current",
+            "hello current channel",
+            thread_id=None,
+            media_files=[],
+        )
+        mirror_mock.assert_not_called()
+
+    def test_parse_target_ref_supports_mumble_server_and_channel(self):
+        assert _parse_target_ref("mumble", "10.42.0.1:64738") == (
+            "10.42.0.1:64738",
+            None,
+            True,
+        )
+        assert _parse_target_ref("mumble", "10.42.0.1:64738:0") == (
+            "10.42.0.1:64738",
+            "0",
+            True,
+        )
+
     def test_cron_duplicate_target_is_skipped_and_explained(self):
         home = SimpleNamespace(chat_id="-1001")
         config, _telegram_cfg = _make_config()
@@ -842,7 +890,7 @@ class TestSendToPlatformDiscordThread:
         send_mock = AsyncMock(return_value={"success": True, "message_id": "1"})
 
         with patch("tools.send_message_tool._send_discord", send_mock):
-            result = asyncio.run(
+            asyncio.run(
                 _send_to_platform(
                     Platform.DISCORD,
                     SimpleNamespace(enabled=True, token="tok", extra={}),

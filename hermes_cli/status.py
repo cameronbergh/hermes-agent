@@ -294,6 +294,7 @@ def show_status(args):
     platforms = {
         "Telegram": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL"),
         "Discord": ("DISCORD_BOT_TOKEN", "DISCORD_HOME_CHANNEL"),
+        "Mumble": ("MUMBLE_BRIDGE_URL", "MUMBLE_HOME_CHANNEL"),
         "WhatsApp": ("WHATSAPP_ENABLED", None),
         "Signal": ("SIGNAL_HTTP_URL", "SIGNAL_HOME_CHANNEL"),
         "Slack": ("SLACK_BOT_TOKEN", None),
@@ -377,16 +378,10 @@ def show_status(args):
             print("  Manager:      systemd (user)")
         
     elif sys.platform == 'darwin':
-        from hermes_cli.gateway import get_launchd_label
+        from hermes_cli.gateway import launchd_service_loaded
         try:
-            result = subprocess.run(
-                ["launchctl", "list", get_launchd_label()],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            is_loaded = result.returncode == 0
-        except subprocess.TimeoutExpired:
+            is_loaded, _ = launchd_service_loaded()
+        except Exception:
             is_loaded = False
         print(f"  Status:       {check_mark(is_loaded)} {'loaded' if is_loaded else 'not loaded'}")
         print("  Manager:      launchd")

@@ -1,4 +1,4 @@
-"""Shared fixtures for gateway e2e tests (Telegram, Discord).
+"""Shared fixtures for gateway e2e tests (Telegram, Discord, Slack, Mumble).
 
 These tests exercise the full async message flow:
     adapter.handle_message(event)
@@ -114,6 +114,7 @@ _ensure_discord_mock()
 _ensure_slack_mock()
 
 from gateway.platforms.discord import DiscordAdapter   # noqa: E402
+from gateway.platforms.mumble import MumbleAdapter  # noqa: E402
 from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
 
 import gateway.platforms.slack as _slack_mod  # noqa: E402
@@ -153,7 +154,7 @@ def make_event(platform: Platform, text: str = "/help", chat_id: str = "e2e-chat
     )
 
 
-def make_runner(platform: Platform, session_entry: SessionEntry = None) -> "GatewayRunner":
+def make_runner(platform: Platform, session_entry: SessionEntry = None):
     """Create a GatewayRunner with mocked internals for e2e testing.
 
     Skips __init__ to avoid filesystem/network side effects.
@@ -215,6 +216,9 @@ def make_adapter(platform: Platform, runner=None):
         with patch.object(ThreadParticipationTracker, "_load", return_value=set()):
             adapter = DiscordAdapter(config)
         platform_key = Platform.DISCORD
+    elif platform == Platform.MUMBLE:
+        adapter = MumbleAdapter(PlatformConfig(enabled=True, extra={"base_url": "http://127.0.0.1:8789"}))
+        platform_key = Platform.MUMBLE
     elif platform == Platform.SLACK:
         adapter = SlackAdapter(config)
         platform_key = Platform.SLACK
@@ -241,7 +245,10 @@ async def send_and_capture(adapter, text: str, platform: Platform, **event_kwarg
 
 
 # Parametrized fixtures for platform-generic tests
-@pytest.fixture(params=[Platform.TELEGRAM, Platform.DISCORD, Platform.SLACK], ids=["telegram", "discord", "slack"])
+@pytest.fixture(
+    params=[Platform.TELEGRAM, Platform.DISCORD, Platform.SLACK, Platform.MUMBLE],
+    ids=["telegram", "discord", "slack", "mumble"],
+)
 def platform(request):
     return request.param
 

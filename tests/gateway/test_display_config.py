@@ -1,5 +1,4 @@
 """Tests for gateway.display_config — per-platform display/verbosity resolver."""
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +195,7 @@ class TestPlatformDefaults:
         """Signal, BlueBubbles, etc. default to 'off' tool progress."""
         from gateway.display_config import resolve_display_setting
 
-        for plat in ("signal", "bluebubbles", "weixin", "wecom", "dingtalk"):
+        for plat in ("signal", "mumble", "bluebubbles", "weixin", "wecom", "dingtalk"):
             assert resolve_display_setting({}, plat, "tool_progress") == "off", plat
 
     def test_minimal_tier_platforms(self):
@@ -284,7 +283,7 @@ class TestConfigMigration:
         import hermes_cli.config as cfg_mod
         importlib.reload(cfg_mod)
 
-        result = cfg_mod.migrate_config(interactive=False, quiet=True)
+        cfg_mod.migrate_config(interactive=False, quiet=True)
         # Re-read config
         updated = yaml.safe_load(config_path.read_text())
         platforms = updated.get("display", {}).get("platforms", {})

@@ -1,6 +1,4 @@
 """Tests for gateway /verbose command (config-gated tool progress cycling)."""
-
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -102,7 +100,7 @@ class TestVerboseCommand:
         # off -> new -> all -> verbose -> off
         expected = ["new", "all", "verbose", "off"]
         for mode in expected:
-            result = await runner._handle_verbose_command(_make_event())
+            await runner._handle_verbose_command(_make_event())
             saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             actual = saved["display"]["platforms"]["telegram"]["tool_progress"]
             assert actual == mode, \
@@ -163,6 +161,26 @@ class TestVerboseCommand:
         assert platforms["telegram"]["tool_progress"] == "verbose"
         # Slack: new -> all (medium tier default = new, cycle to all)
         assert platforms["slack"]["tool_progress"] == "all"
+
+    @pytest.mark.asyncio
+    async def test_mumble_uses_low_tier_default_for_verbose_cycle(self, tmp_path, monkeypatch):
+        """Mumble defaults to off, so /verbose should cycle it to new first."""
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "display:\n  tool_progress_command: true\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(gateway_run, "_hermes_home", hermes_home)
+        runner = _make_runner()
+
+        result = await runner._handle_verbose_command(_make_event(platform=Platform.MUMBLE))
+
+        assert "NEW" in result
+        saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert saved["display"]["platforms"]["mumble"]["tool_progress"] == "new"
 
     @pytest.mark.asyncio
     async def test_no_config_file_returns_disabled(self, tmp_path, monkeypatch):

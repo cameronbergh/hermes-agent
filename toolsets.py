@@ -46,6 +46,10 @@ _HERMES_CORE_TOOLS = [
     "browser_vision", "browser_console",
     # Text-to-speech
     "text_to_speech",
+    # Mumble bridge
+    "mumble_status", "mumble_connect", "mumble_disconnect",
+    "mumble_message", "mumble_join", "mumble_send_audio_file", "mumble_speak",
+    "mumble_events", "mumble_transcripts", "mumble_transcribe_audio_file",
     # Planning & memory
     "todo", "memory",
     # Session history search
@@ -153,6 +157,16 @@ TOOLSETS = {
     "tts": {
         "description": "Text-to-speech: convert text to audio with Edge TTS (free), ElevenLabs, or OpenAI",
         "tools": ["text_to_speech"],
+        "includes": []
+    },
+
+    "mumble": {
+        "description": "Local Mumble bridge tools for connecting Hermes to a Mumble server, sending messages, joining channels, and uploading audio",
+        "tools": [
+            "mumble_status", "mumble_connect", "mumble_disconnect",
+            "mumble_message", "mumble_join", "mumble_send_audio_file", "mumble_speak",
+            "mumble_events", "mumble_transcripts", "mumble_transcribe_audio_file",
+        ],
         "includes": []
     },
     
@@ -270,6 +284,10 @@ TOOLSETS = {
             "cronjob",
             # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
             "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+            # Local Mumble bridge
+            "mumble_status", "mumble_connect", "mumble_disconnect",
+            "mumble_message", "mumble_join", "mumble_send_audio_file", "mumble_speak",
+            "mumble_events",
 
         ],
         "includes": []
@@ -289,6 +307,12 @@ TOOLSETS = {
     
     "hermes-discord": {
         "description": "Discord bot toolset - full access (terminal has safety checks via dangerous command approval)",
+        "tools": _HERMES_CORE_TOOLS,
+        "includes": []
+    },
+
+    "hermes-mumble": {
+        "description": "Mumble bridge toolset - voice channel agent integration via the local bridge",
         "tools": _HERMES_CORE_TOOLS,
         "includes": []
     },
@@ -386,7 +410,7 @@ TOOLSETS = {
     "hermes-gateway": {
         "description": "Gateway toolset - union of all messaging platform tools",
         "tools": [],
-        "includes": ["hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-webhook"]
+        "includes": ["hermes-telegram", "hermes-discord", "hermes-mumble", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-bluebubbles", "hermes-homeassistant", "hermes-email", "hermes-sms", "hermes-mattermost", "hermes-matrix", "hermes-dingtalk", "hermes-feishu", "hermes-wecom", "hermes-wecom-callback", "hermes-weixin", "hermes-webhook"]
     }
 }
 

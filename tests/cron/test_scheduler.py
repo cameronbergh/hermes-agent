@@ -5,8 +5,6 @@ import logging
 import os
 from unittest.mock import AsyncMock, patch, MagicMock
 
-import pytest
-
 from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
 
 
@@ -205,6 +203,32 @@ class TestResolveDeliveryTarget:
             "platform": "discord",
             "chat_id": "1001234567890",
             "thread_id": None,
+        }
+
+    def test_explicit_mumble_target_with_channel_thread(self):
+        job = {
+            "deliver": "mumble:10.42.0.1:64738:0",
+        }
+        result = _resolve_delivery_target(job)
+        assert result == {
+            "platform": "mumble",
+            "chat_id": "10.42.0.1:64738",
+            "thread_id": "0",
+        }
+
+    def test_bare_mumble_platform_uses_matching_origin_chat(self):
+        job = {
+            "deliver": "mumble",
+            "origin": {
+                "platform": "mumble",
+                "chat_id": "10.42.0.1:64738",
+                "thread_id": "0",
+            },
+        }
+        assert _resolve_delivery_target(job) == {
+            "platform": "mumble",
+            "chat_id": "10.42.0.1:64738",
+            "thread_id": "0",
         }
 
 

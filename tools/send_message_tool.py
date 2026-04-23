@@ -5,6 +5,7 @@ Sends a message to a user or channel on any connected messaging platform
 human-friendly channel names to IDs. Works in both CLI and gateway contexts.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -68,7 +69,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567'"
+                "description": "Delivery target. Format: 'platform' (uses home channel/current destination), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for threaded destinations. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'mumble:10.42.0.1:64738:0'"
             },
             "message": {
                 "type": "string",
@@ -151,6 +152,7 @@ def _handle_send(args):
         "slack": Platform.SLACK,
         "whatsapp": Platform.WHATSAPP,
         "signal": Platform.SIGNAL,
+        "mumble": Platform.MUMBLE,
         "bluebubbles": Platform.BLUEBUBBLES,
         "matrix": Platform.MATRIX,
         "mattermost": Platform.MATTERMOST,
@@ -183,6 +185,8 @@ def _handle_send(args):
         if home:
             chat_id = home.chat_id
             used_home_channel = True
+        elif platform == Platform.MUMBLE:
+            chat_id = "current"
         else:
             return json.dumps({
                 "error": f"No home channel set for {platform_name} to determine where to send the message. "
@@ -215,7 +219,7 @@ def _handle_send(args):
                 from gateway.mirror import mirror_to_session
                 from gateway.session_context import get_session_env
                 source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
-                if mirror_to_session(platform_name, chat_id, mirror_text, source_label=source_label, thread_id=thread_id):
+                if chat_id != "current" and mirror_to_session(platform_name, chat_id, mirror_text, source_label=source_label, thread_id=thread_id):
                     result["mirrored"] = True
             except Exception:
                 pass
@@ -245,6 +249,13 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _WEIXIN_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), None, True
+    if platform_name == "mumble":
+        stripped = target_ref.strip()
+        host_port, sep, thread_id = stripped.rpartition(":")
+        if sep and re.fullmatch(r".+:\d+", host_port) and thread_id:
+            return host_port, thread_id, True
+        if re.fullmatch(r".+:\d+", stripped):
+            return stripped, None, True
     if target_ref.lstrip("-").isdigit():
         return target_ref, None, True
     return None, None, False
@@ -382,6 +393,10 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     # --- Weixin: use the native one-shot adapter helper for text + media ---
     if platform == Platform.WEIXIN:
         return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
+
+    # --- Mumble: bridge-backed text + audio delivery ---
+    if platform == Platform.MUMBLE:
+        return await _send_mumble(pconfig.extra, chat_id, message, media_files=media_files)
 
     # --- Non-Telegram platforms ---
     if media_files and not message.strip():
@@ -683,6 +698,59 @@ async def _send_signal(extra, chat_id, message):
             return {"success": True, "platform": "signal", "chat_id": chat_id}
     except Exception as e:
         return _error(f"Signal send failed: {e}")
+
+
+async def _send_mumble(extra, chat_id, message, media_files=None):
+    """Send via the local Mumble bridge HTTP API."""
+    try:
+        import httpx
+    except ImportError:
+        return {"error": "httpx not installed"}
+
+    media_files = media_files or []
+    try:
+        from gateway.config import PlatformConfig
+        from gateway.platforms.mumble import MumbleAdapter
+
+        base_url = str(extra.get("base_url") or os.getenv("MUMBLE_BRIDGE_URL", "")).strip().rstrip("/")
+        if not base_url:
+            return {"error": "Mumble not configured (MUMBLE_BRIDGE_URL required)"}
+
+        warnings = []
+        async with httpx.AsyncClient(base_url=base_url, timeout=30.0) as client:
+            if message.strip():
+                response = await client.post(
+                    "/message",
+                    json={"message": message, "target": "channel"},
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if not payload.get("ok"):
+                    return _error(f"Mumble bridge message send failed: {payload}")
+
+            if media_files:
+                helper = MumbleAdapter(PlatformConfig(enabled=True, extra=extra))
+                for media_path, _is_voice in media_files:
+                    ext = os.path.splitext(media_path)[1].lower()
+                    if ext not in _AUDIO_EXTS:
+                        warnings.append(f"Mumble only supports audio media delivery via send_message; skipped {media_path}")
+                        continue
+                    wav_bytes = await asyncio.to_thread(helper._prepare_wav_bytes, media_path)
+                    response = await client.post(
+                        "/audio/wav",
+                        files={"file": ("reply.wav", wav_bytes, "audio/wav")},
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    if not payload.get("ok"):
+                        return _error(f"Mumble bridge audio send failed: {payload}")
+
+        result = {"success": True, "platform": "mumble", "chat_id": chat_id}
+        if warnings:
+            result["warnings"] = warnings
+        return result
+    except Exception as e:
+        return _error(f"Mumble send failed: {e}")
 
 
 async def _send_email(extra, chat_id, message):

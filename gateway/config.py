@@ -50,6 +50,7 @@ class Platform(Enum):
     LOCAL = "local"
     TELEGRAM = "telegram"
     DISCORD = "discord"
+    MUMBLE = "mumble"
     WHATSAPP = "whatsapp"
     SLACK = "slack"
     SIGNAL = "signal"
@@ -276,6 +277,9 @@ class GatewayConfig:
                 connected.append(platform)
             # Signal uses extra dict for config (http_url + account)
             elif platform == Platform.SIGNAL and config.extra.get("http_url"):
+                connected.append(platform)
+            # Mumble uses a local bridge URL
+            elif platform == Platform.MUMBLE and config.extra.get("base_url"):
                 connected.append(platform)
             # Email uses extra dict for config (address + imap_host + smtp_host)
             elif platform == Platform.EMAIL and config.extra.get("address"):
@@ -837,6 +841,29 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             chat_id=signal_home,
             name=os.getenv("SIGNAL_HOME_CHANNEL_NAME", "Home"),
         )
+
+    # Mumble
+    mumble_enabled = os.getenv("MUMBLE_ENABLED", "").lower() in ("true", "1", "yes")
+    mumble_bridge_url = os.getenv("MUMBLE_BRIDGE_URL", "").strip()
+    if mumble_enabled or mumble_bridge_url:
+        if Platform.MUMBLE not in config.platforms:
+            config.platforms[Platform.MUMBLE] = PlatformConfig()
+        config.platforms[Platform.MUMBLE].enabled = True
+        if mumble_bridge_url:
+            config.platforms[Platform.MUMBLE].extra["base_url"] = mumble_bridge_url.rstrip("/")
+        mumble_poll_interval = os.getenv("MUMBLE_POLL_INTERVAL_SECONDS", "").strip()
+        if mumble_poll_interval:
+            try:
+                config.platforms[Platform.MUMBLE].extra["poll_interval_seconds"] = float(mumble_poll_interval)
+            except ValueError:
+                pass
+        mumble_home = os.getenv("MUMBLE_HOME_CHANNEL", "").strip()
+        if mumble_home:
+            config.platforms[Platform.MUMBLE].home_channel = HomeChannel(
+                platform=Platform.MUMBLE,
+                chat_id=mumble_home,
+                name=os.getenv("MUMBLE_HOME_CHANNEL_NAME", "Home"),
+            )
 
     # Mattermost
     mattermost_token = os.getenv("MATTERMOST_TOKEN")
