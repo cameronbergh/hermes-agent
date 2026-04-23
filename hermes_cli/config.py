@@ -514,10 +514,17 @@ DEFAULT_CONFIG = {
     
     # Text-to-speech configuration
     "tts": {
-        "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "minimax" | "mistral" | "neutts" (local)
+        "provider": "edge",  # "edge" (free) | "elevenlabs" (premium) | "openai" | "minimax" | "mistral" | "neutts" (local) | "kitten" (local) | "mlx" (self-hosted)
         "edge": {
             "voice": "en-US-AriaNeural",
             # Popular: AriaNeural, JennyNeural, AndrewNeural, BrianNeural, SoniaNeural
+        },
+        "mlx": {
+            "base_url": "",  # e.g. http://127.0.0.1:8000
+            "voice": "samantha",  # special voices: samantha, judy
+            "speed": 1.0,
+            "timeout": 60,
+            "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit",
         },
         "elevenlabs": {
             "voice_id": "pNInz6obpgDQGcFmaJgB",  # Adam
@@ -537,6 +544,14 @@ DEFAULT_CONFIG = {
             "ref_text": "",   # Path to reference voice transcript (empty = bundled default)
             "model": "neuphonic/neutts-air-q4-gguf",  # HuggingFace model repo
             "device": "cpu",  # cpu, cuda, or mps
+        },
+        "kitten": {
+            "python_bin": "",  # Optional Python interpreter that has kittentts installed
+            "voice": "Rosie",
+            "model_name": "KittenML/kitten-tts-nano-0.8",
+            "speed": 1.0,
+            "cache_dir": "",
+            "clean_text": True,
         },
     },
     

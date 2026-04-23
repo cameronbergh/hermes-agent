@@ -69,12 +69,10 @@ def _gateway_status() -> str:
             return "unknown"
     elif sys.platform == "darwin":
         try:
-            from hermes_cli.gateway import get_launchd_label
-            r = subprocess.run(
-                ["launchctl", "list", get_launchd_label()],
-                capture_output=True, text=True, timeout=5,
-            )
-            return "loaded (launchd)" if r.returncode == 0 else "not loaded"
+            from hermes_cli.gateway import launchd_service_loaded
+
+            loaded, _ = launchd_service_loaded()
+            return "loaded (launchd)" if loaded else "not loaded"
         except Exception:
             return "unknown"
     return "N/A"

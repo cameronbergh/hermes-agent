@@ -204,6 +204,7 @@ class TestWebServerEndpoints:
         assert resp.status_code == 200
         defaults = resp.json()
         assert "model" in defaults
+        assert "mlx" in defaults["tts"]
 
     def test_get_env_vars(self):
         resp = self.client.get("/api/env")
@@ -308,6 +309,13 @@ class TestBuildSchemaFromConfig:
             assert entry["type"] == "select"
             assert "options" in entry
             assert "local" in entry["options"]
+
+    def test_audio_provider_schema_matches_runtime(self):
+        from hermes_cli.web_server import CONFIG_SCHEMA
+
+        assert "mlx" in CONFIG_SCHEMA["tts.provider"]["options"]
+        assert "minimax" in CONFIG_SCHEMA["tts.provider"]["options"]
+        assert "groq" in CONFIG_SCHEMA["stt.provider"]["options"]
 
     def test_empty_prefix_produces_correct_keys(self):
         from hermes_cli.web_server import _build_schema_from_config

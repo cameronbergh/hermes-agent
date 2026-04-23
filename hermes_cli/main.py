@@ -4099,14 +4099,16 @@ def cmd_update(args):
             # --- Launchd services (macOS) ---
             if is_macos():
                 try:
-                    from hermes_cli.gateway import launchd_restart, get_launchd_label, get_launchd_plist_path
+                    from hermes_cli.gateway import (
+                        get_launchd_label,
+                        get_launchd_plist_path,
+                        launchd_restart,
+                        launchd_service_loaded,
+                    )
                     plist_path = get_launchd_plist_path()
                     if plist_path.exists():
-                        check = subprocess.run(
-                            ["launchctl", "list", get_launchd_label()],
-                            capture_output=True, text=True, timeout=5,
-                        )
-                        if check.returncode == 0:
+                        loaded, _ = launchd_service_loaded()
+                        if loaded:
                             try:
                                 launchd_restart()
                                 restarted_services.append(get_launchd_label())
@@ -4969,7 +4971,7 @@ For more help on a command:
     cron_create.add_argument("schedule", help="Schedule like '30m', 'every 2h', or '0 9 * * *'")
     cron_create.add_argument("prompt", nargs="?", help="Optional self-contained prompt or task instruction")
     cron_create.add_argument("--name", help="Optional human-friendly job name")
-    cron_create.add_argument("--deliver", help="Delivery target: origin, local, telegram, discord, signal, or platform:chat_id")
+    cron_create.add_argument("--deliver", help="Delivery target: origin, local, telegram, discord, signal, mumble, or platform:chat_id")
     cron_create.add_argument("--repeat", type=int, help="Optional repeat count")
     cron_create.add_argument("--skill", dest="skills", action="append", help="Attach a skill. Repeat to add multiple skills.")
     cron_create.add_argument("--script", help="Path to a Python script whose stdout is injected into the prompt each run")
